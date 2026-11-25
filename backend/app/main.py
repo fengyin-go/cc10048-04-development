@@ -12,6 +12,7 @@ from app.config import settings
 from app.routers import ROUTERS
 from app.routers.chains import router as chains_router
 from app.routers.domain import router as domain_router
+from app.routers.governance import router as governance_router
 from app.store import store
 
 app = FastAPI(title="多维指标分析与实验评估平台", version="1.0.0")
@@ -35,6 +36,9 @@ def overview() -> dict[str, object]:
     """运营概览：把各业务模块的待处理量汇总成看板卡片。"""
     return store.overview()
 
+
+# 口径治理链路的受控统计路由（固定前缀，避免被 /api/{module} 动态路径抢匹配）
+app.include_router(governance_router)
 
 # 业务链路路由
 app.include_router(chains_router)

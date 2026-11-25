@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.governance import DEFAULT_SCOPE, governance, parse_duration_ms
 from app.store import store
 
 
@@ -42,8 +43,32 @@ class QueryLogService(BaseModuleService):
             "abnormal": is_slow,
         }
         store.rows(self.MODULE).append(new_log)
+        shared = self.share_record(new_log["id"])
         return {"log_id": new_log["id"], "status": new_log["status"],
-                "duration_ms": duration, "slow_query": is_slow}
+                "duration_ms": duration, "slow_query": is_slow,
+                "共享记录标识": shared.get("共享记录标识"),
+                "共享计入统计": shared.get("计入统计")}
+
+    def share_record(
+        self, entry_id: int, *, scope: str = DEFAULT_SCOPE,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """把一条原始查询记录转换成受控共享记录；原始记录仍只留在 query_log。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"error": f"查询记录 {entry_id} 不存在"}
+        result = governance.register_record(
+            query_content=str(entry.get("查询内容", "")),
+            query_user=str(entry.get("查询用户", "")),
+            scope=scope,
+            period=str(entry.get("查询时间", "")),
+            request_id=request_id or f"QL-{entry_id}",
+            query_time=str(entry.get("查询时间", "")),
+            duration_ms=parse_duration_ms(entry.get("执行耗时")),
+            params={"返回行数": entry.get("返回行数"), "缓存命中": entry.get("缓存命中")},
+            status=str(entry.get("status", "")),
+        )
+        return result["记录"] | {"计入统计": result["计入统计"], "重复回执": result["重复回执"]}
 
     def domain_enrich(self, config_id: int) -> dict:
         """对当前模块执行标准化操作，联动回填和批次，产出标准化数据产物。

@@ -75,6 +75,20 @@ npm run dev
 - 每个模块仍保留独立`backend/app/services/<模块>.py`；纯前端保留
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
+- 口径治理共享接口集中在 `/api/governance`：
+
+  | 接口 | 用途 |
+  | --- | --- |
+  | `POST /records` | 登记查询，返回脱敏共享记录（不含原文/用户/实参） |
+  | `GET /records`、`/records/{id}` | 改进小组读取共享记录（可含重复回执标记） |
+  | `GET /stats` | 实时统计：模式频次 + 可复核合计（按实际请求去重） |
+  | `POST /batches` | 发出共享批次；范围与口径随批次固化，已发出不可改写 |
+  | `GET /batches`、`/batches/{id}`、`/batches/{id}/recheck` | 批次追溯与差异复核（不回写旧批次） |
+  | `POST /stats/merge` | 合并多个批次；同范围可跨期关联查询者，跨范围仅模式级合计 |
+  | `GET /raw/{id}`、`/raw/by-shared/{id}` | 原始记录回查，仅限原权限范围（`X-Operator-Scopes`） |
+
+  原始查询记录只在原权限范围回查；权限范围用请求头 `X-Operator-Scopes`（多值逗号分隔，
+  非 ASCII 需 URL 编码）声明，未声明时原始回查一律拒绝。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
 领域：数据工程

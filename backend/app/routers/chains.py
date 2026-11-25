@@ -12,6 +12,7 @@ from app.compute import (
     chi_square_test, compute_calibrate_bias, compute_freshness_delay,
     generate_mock_metric_values, random_sample, segment_diff_report, t_test,
 )
+from app.services.governance import DEFAULT_SCOPE, governance
 from app.store import store
 
 router = APIRouter(prefix="/api/chains", tags=["业务链路"])
@@ -305,21 +306,26 @@ def chain_calibrate_governance(calibrate_id: int) -> dict[str, Any]:
             "impact": "需更新返回字段值" if abs(bias["bias_pct"]) > 1 else "偏差小于1%，无需操作",
         })
 
-    # Step 3: 查询日志追溯
-    query_logs = [row for row in store.rows("query_log")][:3]
-    rng = random.Random(calibrate_id)
-    log_analysis = []
-    for log in query_logs:
-        log_analysis.append({
-            "log_id": log.get("id"),
-            "query_user": log.get("查询用户"),
-            "query_time": log.get("查询时间"),
-            "duration_ms": rng.randint(10, 5000),
-            "cache_hit": rng.random() > 0.4,
-            "row_count": rng.randint(1, 10000),
-        })
-
-    avg_duration = round(sum(item["duration_ms"] for item in log_analysis) / max(len(log_analysis), 1), 2)
+    # Step 3: 查询日志→受控共享统计追溯（只消费脱敏后的共享记录）
+    shared_records = governance.list_public_records(scope=DEFAULT_SCOPE, include_receipts=False)
+    shared_view, _ = governance.live_stats(
+        scope=DEFAULT_SCOPE, operator_scopes={"*"}
+    )
+    log_analysis = [
+        {
+            "shared_id": record.get("共享记录标识"),
+            "pattern_id": record.get("模式标识"),
+            "slow_category": record.get("慢查类别"),
+            "slow": record.get("是否慢查"),
+            "duration_bucket": record.get("耗时区间"),
+            "period": record.get("统计周期"),
+        }
+        for record in shared_records[:3]
+    ]
+    avg_duration = (
+        round(sum(int(r.get("执行耗时_ms") or 0) for r in shared_records) / len(shared_records), 2)
+        if shared_records else 0.0
+    )
     return {
         "chain": "口径治理链路",
         "calibration": {
@@ -330,8 +336,11 @@ def chain_calibrate_governance(calibrate_id: int) -> dict[str, Any]:
         "data_service_impact": service_impacts,
         "query_log_analysis": {
             "logs": log_analysis,
+            "shared_records": len(shared_records),
+            "pattern_frequency": (shared_view or {}).get("模式频次", []),
+            "totals": (shared_view or {}).get("合计", {}),
             "avg_duration_ms": avg_duration,
-            "total_logs": len(store.rows("query_log")),
+            "raw_access": "原始查询记录仅限原权限范围回查，不在链路输出中返回",
         },
     }
 

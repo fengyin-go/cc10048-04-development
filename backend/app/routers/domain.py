@@ -170,6 +170,19 @@ def query_log_record() -> dict[str, Any]:
     return svc.log_query()
 
 
+@router.post("/query_log/{entry_id}/share")
+def query_log_share(entry_id: int) -> dict[str, Any]:
+    """把查询记录转换为改进小组可见的受控共享记录（脱敏）。"""
+    from app.services.query_log import QueryLogService
+    svc = SERVICES.get("query_log")
+    if not svc or not isinstance(svc, QueryLogService):
+        raise HTTPException(404, "查询日志服务不可用")
+    result = svc.share_record(entry_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
 @router.get("/data_sample/{config_id}/execute")
 def data_sample_execute(config_id: int) -> dict[str, Any]:
     """数据采样执行。"""

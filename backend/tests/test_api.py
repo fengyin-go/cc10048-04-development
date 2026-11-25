@@ -1,4 +1,6 @@
 """FastAPI 集成测试：所有端点功能验证。"""
+from urllib.parse import quote
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -218,3 +220,108 @@ class TestAction:
         assert resp.status_code == 200
         data = resp.json()
         assert data["ok"] is False
+
+class TestGovernanceAPI:
+    """口径治理共享日志接口：脱敏登记、批次、合并与受限回查。"""
+
+    SCOPE = "接口测试范围"
+
+    @classmethod
+    def setup_class(cls):
+        client.post("/api/governance/records", json={
+            "query_content": "SELECT * FROM payments WHERE payer_id = 'user_8' AND pay_date = '2026-11-22'",
+            "query_user": "user_8", "scope": cls.SCOPE, "period": "2026-11-22",
+            "request_id": "API-SUN-1", "duration_ms": 5200})
+        client.post("/api/governance/records", json={
+            "query_content": "SELECT * FROM payments WHERE payer_id = 'user_8' AND pay_date = '2026-11-23'",
+            "query_user": "user_8", "scope": cls.SCOPE, "period": "2026-11-23",
+            "request_id": "API-MON-1", "duration_ms": 6100})
+        client.post("/api/governance/records", json={
+            "query_content": "SELECT * FROM payments WHERE payer_id = 'user_8' AND pay_date = '2026-11-23'",
+            "query_user": "user_8", "scope": cls.SCOPE, "period": "2026-11-23",
+            "request_id": "API-MON-1", "duration_ms": 6100})
+
+    def test_register_returns_sanitized_record(self):
+        resp = client.post("/api/governance/records", json={
+            "query_content": "SELECT * FROM orders WHERE buyer_id = 'user_5' AND amount > 300",
+            "query_user": "user_5", "scope": self.SCOPE, "period": "2026-11-24",
+            "request_id": "API-REG-1", "duration_ms": 120})
+        assert resp.status_code == 200
+        record = resp.json()["记录"]
+        assert "user_5" not in str(record)
+        assert "300" not in record["查询模式"]
+        assert record["查询模式"].startswith("select * from orders")
+
+    def test_duplicate_receipt_not_counted(self):
+        records = client.get(
+            "/api/governance/records",
+            params={"scope": self.SCOPE},
+            headers={"X-Operator-Scopes": quote(self.SCOPE)}).json()
+        receipts = [item for item in records["items"] if item["重复回执"]]
+        assert len(receipts) >= 1
+        assert receipts[0]["计入统计"] is False
+
+    def test_live_stats_readable_by_improvement_group(self):
+        # 共享统计本身是脱敏材料，改进小组可直接读取（无需范围凭据）。
+        public = client.get(
+            "/api/governance/stats",
+            params={"scope": self.SCOPE},
+            headers={"X-Operator-Scopes": quote(self.SCOPE)})
+        assert public.status_code == 200
+        assert public.json()["合计"]["请求合计"] >= 3
+        anonymous = client.get("/api/governance/stats", params={"scope": self.SCOPE})
+        assert anonymous.status_code == 200
+        assert anonymous.json()["合计"]["请求合计"] == public.json()["合计"]["请求合计"]
+
+    def test_batches_and_merge(self):
+        sun = client.post("/api/governance/batches", json={
+            "period": "2026-11-22", "scope": self.SCOPE, "operator_scopes": [self.SCOPE]})
+        mon = client.post("/api/governance/batches", json={
+            "period": "2026-11-23", "scope": self.SCOPE, "operator_scopes": [self.SCOPE]})
+        assert sun.status_code == 200 and mon.status_code == 200
+        sun_id = sun.json()["batch"]["共享批次标识"]
+        mon_id = mon.json()["batch"]["共享批次标识"]
+        merged = client.post("/api/governance/stats/merge", json={
+            "batch_ids": [sun_id, mon_id], "operator_scopes": [self.SCOPE]})
+        assert merged.status_code == 200
+        view = merged.json()
+        assert view["合计"]["请求合计"] == 2
+        assert view["合计"]["重复回执剔除数"] == 1
+        assert view["可关联范围"]["同查询者跨期可关联"] is True
+
+    def test_recheck_keeps_issued_stats(self):
+        batch = client.post("/api/governance/batches", json={
+            "period": "2026-11-22", "scope": self.SCOPE, "operator_scopes": [self.SCOPE]}).json()["batch"]
+        client.post("/api/governance/records", json={
+            "query_content": "SELECT * FROM payments WHERE payer_id = 'user_8' AND pay_date = '2026-11-22'",
+            "query_user": "user_8", "scope": self.SCOPE, "period": "2026-11-22",
+            "request_id": "API-LATE-1", "duration_ms": 7000})
+        recheck = client.get(
+            f"/api/governance/batches/{batch['共享批次标识']}/recheck",
+            headers={"X-Operator-Scopes": quote(self.SCOPE)}).json()
+        assert recheck["已发出统计"]["去重请求数"] == 1
+        assert recheck["当前实时统计"]["去重请求数"] == 2
+        assert recheck["已发出统计保持冻结"] is True
+
+    def test_raw_access_requires_original_scope(self):
+        shared_id = client.get(
+            "/api/governance/records",
+            params={"scope": self.SCOPE},
+            headers={"X-Operator-Scopes": quote(self.SCOPE)}).json()["items"][0]["共享记录标识"]
+        denied = client.get(
+            f"/api/governance/raw/by-shared/{shared_id}",
+            headers={"X-Operator-Scopes": quote("别的范围")})
+        assert denied.status_code == 403
+        allowed = client.get(
+            f"/api/governance/raw/by-shared/{shared_id}",
+            headers={"X-Operator-Scopes": quote(self.SCOPE)})
+        assert allowed.status_code == 200
+        assert "查询内容" in allowed.json()
+
+    def test_public_record_does_not_leak_raw(self):
+        shared = client.get(
+            "/api/governance/records",
+            params={"scope": self.SCOPE},
+            headers={"X-Operator-Scopes": quote(self.SCOPE)}).json()["items"][0]
+        assert "查询内容" not in shared
+        assert "查询用户" not in shared
